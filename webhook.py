@@ -7,7 +7,6 @@ Start:    uvicorn webhook:app --host 0.0.0.0 --port $PORT
 """
 
 import os
-import json
 import traceback
 import stripe
 from fastapi import FastAPI, Request, HTTPException
@@ -22,22 +21,6 @@ supabase = create_client(
     os.getenv("SUPABASE_URL"),
     os.getenv("SUPABASE_SERVICE_KEY"),
 )
-
-
-def _extract_email(session_dict):
-    """Look for the buyer email in every place Stripe might put it."""
-    # 1) customer_details.email
-    cd = session_dict.get("customer_details")
-    if isinstance(cd, dict) and cd.get("email"):
-        return cd["email"]
-    # 2) customer_email
-    if session_dict.get("customer_email"):
-        return session_dict["customer_email"]
-    # 3) prefilled.email (payment links)
-    pf = session_dict.get("prefilled")
-    if isinstance(pf, dict) and pf.get("email"):
-        return pf["email"]
-    return None
 
 
 @app.get("/")
@@ -59,27 +42,38 @@ async def stripe_webhook(request: Request):
     if event["type"] == "checkout.session.completed":
         session = event["data"]["object"]
 
-        # convert the Stripe object to a plain dict robustly
+        # Stripe objects support direct key access with [] and .get via
+        # the mapping interface. Access fields directly rather than converting.
+        email = None
         try:
-            session_dict = json.loads(json.dumps(session, default=lambda o: dict(o)))
+            cd = session["customer_details"]
+            if cd is not None:
+                email = cd["email"]
         except Exception:
+            pass
+
+        if not email:
             try:
-                session_dict = dict(session)
+                email = session["customer_email"]
             except Exception:
-                session_dict = {}
+                pass
 
-        # DEBUG: log the keys and the customer bits so we can see what's there
-        print(f"[webhook] session keys: {list(session_dict.keys())}")
-        print(f"[webhook] customer_details: {session_dict.get('customer_details')}")
-        print(f"[webhook] customer_email: {session_dict.get('customer_email')}")
+        # debug: show what we actually have
+        try:
+            print(f"[webhook] session id: {session['id']}")
+        except Exception:
+            pass
+        try:
+            print(f"[webhook] customer_details: {session['customer_details']}")
+        except Exception as e:
+            print(f"[webhook] could not read customer_details: {e}")
 
-        email = _extract_email(session_dict)
         print(f"[webhook] resolved email={email!r}")
 
         if email:
             try:
                 result = supabase.table("paid_users").upsert(
-                    {"email": email.strip().lower()}
+                    {"email": str(email).strip().lower()}
                 ).execute()
                 print(f"[webhook] upsert OK: {result.data}")
             except Exception as e:
